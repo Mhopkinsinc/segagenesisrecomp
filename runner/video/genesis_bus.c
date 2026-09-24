@@ -47,6 +47,7 @@ extern unsigned g_snd_pcz;
 extern uint32_t machine_z80_pc(void);
 /* glue.c: charge 68K->VDP DMA freeze cycles to the recompiled CPU. */
 extern void glue_charge_68k_stall(uint32_t cycles);
+extern uint32_t glue_line_cycle_position(void);   /* 68K cycles into the current scanline */
 #define CHIP_PC_68K() (g_snd_pcz = 0xFFFFu)
 #define CHIP_PC_Z80() (g_snd_pcz = (unsigned)machine_z80_pc())
 
@@ -315,7 +316,7 @@ uint16_t gbus_read16(GenesisBus *b, uint32_t a)
     if (a >= 0xC00000u && a < 0xC00010u) {                          /* VDP      */
         if (a < 0xC00004u) return gvdp_read_data(b->vdp);
         if (a < 0xC00008u) return gvdp_read_control(b->vdp);
-        return gvdp_read_hv_counter(b->vdp);
+        return gvdp_read_hv_counter_at(b->vdp, glue_line_cycle_position());
     }
     if (a >= 0xA00000u && a < 0xA10000u) {                          /* Z80/FM   */
         if ((a & 0xFFFFu) < 0x2000u) {

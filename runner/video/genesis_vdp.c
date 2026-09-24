@@ -395,9 +395,26 @@ uint16_t gvdp_read_control(GVDP *v)
 
 uint16_t gvdp_read_hv_counter(const GVDP *v)
 {
-    /* Approximate: V counter in the high byte, H counter low. Refined during
-     * raster-timing validation. */
+    /* No cycle position known: V counter in the high byte, H byte coarse. */
     return (uint16_t)(((v->scanline & 0xFF) << 8) | (v->in_hblank ? 0x00 : 0x80));
+}
+
+uint16_t gvdp_read_hv_counter_at(const GVDP *v, uint32_t line_cycle)
+{
+    /* V counter: 0..0xEA for the 224-line NTSC frame then the counter jumps
+     * to 0xE5 and counts up to 0xFF (lines 0xEB.. of the 262-line frame). */
+    unsigned line = v->scanline;
+    unsigned vc = (line <= 0xEAu) ? line : (0xE5u + (line - 0xEBu));
+    /* H counter: cycle position scaled onto the line's distinct H values,
+     * then the hardware discontinuity applied (H40: 0x00-0xB6, 0xE4-0xFF;
+     * H32: 0x00-0x93, 0xE9-0xFF). 488 68K cycles per line. */
+    unsigned h40   = MODE4_H40(v) ? 1u : 0u;
+    unsigned count = h40 ? 211u : 171u;
+    unsigned lo_end = h40 ? 0xB6u : 0x93u;
+    unsigned hi_beg = h40 ? 0xE4u : 0xE9u;
+    unsigned idx = (unsigned)(((uint64_t)(line_cycle % 488u) * count) / 488u);
+    unsigned hc  = (idx <= lo_end) ? idx : (hi_beg + (idx - lo_end - 1u));
+    return (uint16_t)(((vc & 0xFFu) << 8) | (hc & 0xFFu));
 }
 
 /* ---- Per-scanline timing -------------------------------------------------- */

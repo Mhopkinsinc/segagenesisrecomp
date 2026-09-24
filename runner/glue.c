@@ -789,6 +789,24 @@ static void check_cycle_budget(void)
     }
 }
 
+/* 68K cycle position within the current scanline, for the VDP's H counter.
+ * The scheduler runs the game one 488-cycle chunk per line; the position is
+ * the part of that chunk already consumed (budget drained so far plus the
+ * instructions executed since the last drain). Outside a chunk (atomic
+ * handler paths) the raw per-instruction counter modulo a line is the best
+ * available phase. Never returns >= 488. */
+uint32_t glue_line_cycle_position(void)
+{
+    uint32_t now = g_audio_cycle_counter;
+    uint32_t since = (now > s_budget_cyc_seen) ? (now - s_budget_cyc_seen) : 0u;
+    if (s_interleave_active && s_chunk_cycles) {
+        int32_t drained = (int32_t)s_chunk_cycles - s_cycle_budget;
+        if (drained < 0) drained = 0;
+        return ((uint32_t)drained + since) % 488u;
+    }
+    return now % 488u;
+}
+
 /* Charge 68K freeze cycles (a 68K->VDP DMA transfer) to the recompiled CPU's
  * accounting by advancing the cycle counter: that advances the audio-stamp
  * axis (hardware time passes during the freeze), drains the interleave budget

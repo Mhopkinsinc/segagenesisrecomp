@@ -112,6 +112,13 @@ uint16_t gvdp_read_control (GVDP *v);          /* status register             */
 
 /* H/V counter read ($C00008). */
 uint16_t gvdp_read_hv_counter(const GVDP *v);
+/* HV counter with the H byte derived from `line_cycle`, the 68K's cycle
+ * position within the current scanline (0..487, 488 = one NTSC line). The H
+ * counter runs 0x00-0xB6 then 0xE4-0xFF in H40 (0x00-0x93, 0xE9-0xFF in H32),
+ * i.e. 211 / 171 distinct values per line. Games read $C00008 as an entropy
+ * source (NHL 94 gates player fatigue on `and.w #$7F` of it) as well as for
+ * raster timing, so a constant H byte is wrong for both. */
+uint16_t gvdp_read_hv_counter_at(const GVDP *v, uint32_t line_cycle);
 
 /* Fetch-and-clear the 68K freeze cycles owed by the last 68K->VDP DMA
  * (hardware freezes the 68K for the whole transfer; fill/copy run in
