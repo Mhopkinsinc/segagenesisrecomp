@@ -652,6 +652,7 @@ static MainCpuClock s_main_cpu_clock;
 static unsigned s_main_cpu_divisor = 1;
 static uint32_t s_main_cpu_stalls;
 static int s_irq_in_progress = 0; /* also excludes interleaved IRQs from acceleration */
+static void run_pending_irq_after_yield(void);   /* defined with the IRQ delivery code below */
 static int32_t s_cycle_budget = 0;
 static int     s_game_yielded_vblank = 0;
 static int s_state_requested,s_state_parked;
@@ -783,6 +784,7 @@ static void check_cycle_budget(void)
             g_chunk_yield_count++;
             { char stack_marker; game_stack_note("cycle-budget", &stack_marker); }
             fiber_switch(s_main_fiber);
+            run_pending_irq_after_yield();
         }
     }
 }
@@ -812,6 +814,15 @@ void glue_charge_68k_stall(uint32_t cycles)
  * desynced VRAM. We now LATCH it and deliver at the next scanline whose mask
  * permits — see glue_own_vint_service_latched(). */
 static int s_own_vint_latched = 0;
+/* Always-on V-int delivery telemetry (queried by the TCP `vblank_info`
+ * command). Cheap counters only: when a game's frame counter stops ticking
+ * these say whether V-ints were delivered atomically, interleaved, latched
+ * behind a raised mask, or latched behind an in-progress handler. */
+uint64_t g_dbg_vint_delivered_atomic      = 0;
+uint64_t g_dbg_vint_delivered_interleaved = 0;
+uint64_t g_dbg_vint_pending_flagged       = 0;
+uint64_t g_dbg_vint_latched_mask          = 0;
+uint64_t g_dbg_vint_latched_busy          = 0;
 
 /* --- STAGE 1: interleaved interrupt delivery (behind GENESIS_INTERLEAVE_IRQ) --
  * The atomic model runs a V-int/H-int handler to completion on the MAIN fiber
@@ -828,9 +839,24 @@ static int s_pending_irq     = 0;    /* level (4/6) flagged by scheduler, run by
 static int interleave_irq_on(void) {
     if (s_interleave_irq < 0) {
         const char *e = getenv("GENESIS_INTERLEAVE_IRQ");
-        s_interleave_irq = (e && *e && *e != '0') ? 1 : 0;
+        if (e && *e) s_interleave_irq = (*e != '0') ? 1 : 0;
+        else         s_interleave_irq = g_game_spec.vint_interleave_default ? 1 : 0;
     }
     return s_interleave_irq;
+}
+
+static void own_run_handler_interleaved(int level, GVDP *vdp);
+
+/* A V-int flagged by the scheduler while the game fiber was away at a
+ * cycle-budget or poll yield (not parked at WaitForVBlank): run it now, on
+ * the game fiber, before the interrupted code continues. Only reached for
+ * games that opt into GameSpec.vint_interleave_default. */
+static void run_pending_irq_after_yield(void)
+{
+    while (s_pending_irq && !s_irq_in_progress && !s_in_vblank_service) {
+        int lvl = s_pending_irq; s_pending_irq = 0;
+        own_run_handler_interleaved(lvl, &g_machine.vdp);
+    }
 }
 
 /* Run the game's V_Int(6) handler atomically against OUR work RAM + VDP. Saves
@@ -848,14 +874,29 @@ static int interleave_irq_on(void) {
 uint32_t g_68k_stamp_rebase = 0;
 extern uint32_t machine_z80_stamp(void);   /* raster cursor, master cycles */
 
+/* Where an interrupt handler's frames go. A configured intr_stack relocates
+ * the handler to a private region and save/restores the 256 bytes below it
+ * (the Sonic runners' deterministic model). intr_stack = 0 means HARDWARE
+ * behaviour: push onto the game's live A7. Needed when the main program's
+ * stack occupies the reset-SSP region itself (NHL 94's RunGame sets sp=$FFFE),
+ * where a relocated handler would sit on top of live return slots. */
+static uint32_t irq_stack_base(void)
+{
+    return g_game_layout.intr_stack ? g_game_layout.intr_stack
+                                    : (g_cpu.A[7] & 0xFFFFFFu);
+}
+static int irq_stack_is_live(void) { return g_game_layout.intr_stack == 0; }
+
 static void own_deliver_vint(GVDP *vdp)
 {
-    const uint32_t STK = g_game_layout.intr_stack;
+    g_dbg_vint_delivered_atomic++;
+    const uint32_t STK = irq_stack_base();
+    const int live = irq_stack_is_live();
     uint32_t byteoff = (STK - 256u) & 0xFFFFu;
     uint8_t save[256];
     M68KState saved = g_cpu;
     int saved_split_sp_popped = recomp_interrupt_context_enter();
-    for (int i = 0; i < 256; i++) save[i] = g_ram[(byteoff + i) & 0xFFFFu];
+    if (!live) for (int i = 0; i < 256; i++) save[i] = g_ram[(byteoff + i) & 0xFFFFu];
     g_cpu.A[7] = STK;
     s_in_vblank_service = 1;
     uint32_t saved_rebase = g_68k_stamp_rebase;
@@ -912,7 +953,7 @@ static void own_deliver_vint(GVDP *vdp)
     vdp->in_vblank = saved_vb;
     g_rte_pending_ptr = &s_rte_real; g_rte_pending = 0;
     s_in_vblank_service = 0;
-    for (int i = 0; i < 256; i++) g_ram[(byteoff + i) & 0xFFFFu] = save[i];
+    if (!live) for (int i = 0; i < 256; i++) g_ram[(byteoff + i) & 0xFFFFu] = save[i];
     g_cpu = saved;
     recomp_interrupt_context_leave(saved_split_sp_popped);
     s_game_yielded_vblank = 0;
@@ -931,12 +972,14 @@ static void own_deliver_vint(GVDP *vdp)
  * than re-entering. */
 static void own_run_handler_interleaved(int level, GVDP *vdp)
 {
-    const uint32_t STK = g_game_layout.intr_stack;
+    if (level == 6) g_dbg_vint_delivered_interleaved++;
+    const uint32_t STK = irq_stack_base();
+    const int live = irq_stack_is_live();
     uint32_t byteoff = (STK - 256u) & 0xFFFFu;
     uint8_t save[256];
     M68KState saved = g_cpu;
     int saved_split_sp_popped = recomp_interrupt_context_enter();
-    for (int i = 0; i < 256; i++) save[i] = g_ram[(byteoff + i) & 0xFFFFu];
+    if (!live) for (int i = 0; i < 256; i++) save[i] = g_ram[(byteoff + i) & 0xFFFFu];
     g_cpu.A[7] = STK;
     g_cpu.SR = (uint16_t)((g_cpu.SR & ~0x0700u) | ((uint16_t)(level & 7) << 8));
     s_irq_in_progress = 1;
@@ -949,7 +992,7 @@ static void own_run_handler_interleaved(int level, GVDP *vdp)
     else            { if (g_game_spec.call_hblank) g_game_spec.call_hblank(); }
     g_rte_pending_ptr = &s_rte_real; g_rte_pending = 0;
     vdp->in_vblank = saved_vb;
-    for (int i = 0; i < 256; i++) g_ram[(byteoff + i) & 0xFFFFu] = save[i];
+    if (!live) for (int i = 0; i < 256; i++) g_ram[(byteoff + i) & 0xFFFFu] = save[i];
     g_cpu = saved;
     recomp_interrupt_context_leave(saved_split_sp_popped);
     s_irq_in_progress = 0;
@@ -967,7 +1010,7 @@ void glue_own_interrupt(int level, GVDP *vdp)
      * a crossing V-int and let it deliver after the current handler RTEs. (SR
      * mask=level usually makes imask>=6 below anyway; this guards the case where
      * the handler itself drops the mask mid-run.) */
-    if (s_irq_in_progress) { if (level == 6) s_own_vint_latched = 1; return; }
+    if (s_irq_in_progress) { if (level == 6) { s_own_vint_latched = 1; g_dbg_vint_latched_busy++; } return; }
     int imask = (g_cpu.SR >> 8) & 7;
 
     if (level == 6) {
@@ -991,8 +1034,13 @@ void glue_own_interrupt(int level, GVDP *vdp)
              * runs at the glue_yield_for_vblank resume point. Mid-run delivery
              * (game not parked) still uses the atomic path below — no regression
              * for lag-frame V-ints. */
-            if (interleave_irq_on() && s_game_yielded_vblank) {
+            if (interleave_irq_on() &&
+                (s_game_yielded_vblank || g_game_spec.vint_interleave_default)) {
+                /* Parked at WaitForVBlank, or a game that takes ALL V-ints
+                 * interleaved: flag it; the game fiber runs the handler at
+                 * its resume point (WaitForVBlank, cycle-budget or poll yield). */
                 s_pending_irq = 6;
+                g_dbg_vint_pending_flagged++;
                 s_game_yielded_vblank = 0;   /* let glue_run_game_chunk resume the fiber */
             } else {
                 own_deliver_vint(vdp);
@@ -1011,14 +1059,16 @@ void glue_own_interrupt(int level, GVDP *vdp)
                       s_own_vint_latched); }
 #endif
             s_own_vint_latched = 1;
+            g_dbg_vint_latched_mask++;
         }
     } else if (level == 4 && imask < 4) {
-        const uint32_t STK = g_game_layout.intr_stack;
+        const uint32_t STK = irq_stack_base();
+        const int live = irq_stack_is_live();
         uint32_t byteoff = (STK - 256u) & 0xFFFFu;
         uint8_t save[256];
         M68KState saved = g_cpu;
         int saved_split_sp_popped = recomp_interrupt_context_enter();
-        for (int i = 0; i < 256; i++) save[i] = g_ram[(byteoff + i) & 0xFFFFu];
+        if (!live) for (int i = 0; i < 256; i++) save[i] = g_ram[(byteoff + i) & 0xFFFFu];
         g_cpu.A[7] = STK;
         s_in_vblank_service = 1;
         /* Same audio-stamp re-base as own_deliver_vint: H-int handler chip
@@ -1039,7 +1089,7 @@ void glue_own_interrupt(int level, GVDP *vdp)
         g_rte_pending_ptr = &s_rte_real; g_rte_pending = 0;
         g_68k_stamp_rebase = saved_rebase;
         s_in_vblank_service = 0;
-        for (int i = 0; i < 256; i++) g_ram[(byteoff + i) & 0xFFFFu] = save[i];
+        if (!live) for (int i = 0; i < 256; i++) g_ram[(byteoff + i) & 0xFFFFu] = save[i];
         g_cpu = saved;
         recomp_interrupt_context_leave(saved_split_sp_popped);
     }
@@ -1066,6 +1116,29 @@ int glue_own_vint_service_latched(GVDP *vdp)
  * (glue_own_vint_service_latched() would consume it — must not, during a
  * side-effect-free snapshot). */
 int glue_cosim_vint_latched(void) { return s_own_vint_latched; }
+
+/* Snapshot of the V-int delivery state machine for `vblank_info`. */
+void glue_vint_debug_snapshot(int *irq_in_progress, int *latched, int *pending_irq,
+                              int *game_yielded_vblank)
+{
+    *irq_in_progress     = s_irq_in_progress;
+    *latched             = s_own_vint_latched;
+    *pending_irq         = s_pending_irq;
+    *game_yielded_vblank = s_game_yielded_vblank;
+}
+
+/* Scheduler-side view of why the game fiber may not be advancing. */
+void glue_sched_debug_snapshot(uint32_t *irq_cycle_debt, int32_t *cycle_budget,
+                               uint32_t *main_cpu_stalls, uint64_t *chunk_yields,
+                               int *state_parked, int *game_running)
+{
+    *irq_cycle_debt  = s_irq_cycle_debt;
+    *cycle_budget    = s_cycle_budget;
+    *main_cpu_stalls = s_main_cpu_stalls;
+    *chunk_yields    = g_chunk_yield_count;
+    *state_parked    = s_state_parked;
+    *game_running    = s_game_running;
+}
 
 /* Yield-site cycle-accumulator log.  Each line records the state of
  * g_cycle_accumulator at the moment the game fiber yields for VBlank.
@@ -1189,6 +1262,7 @@ void glue_yield_for_interrupt_poll(void)
     s_watchdog_counter = 0;
     { char stack_marker; game_stack_note("irq-poll", &stack_marker); }
     fiber_switch(s_main_fiber);
+    run_pending_irq_after_yield();
 }
 
 /* Called from main loop: start the game frame. With interleave mode,

@@ -154,6 +154,10 @@ typedef struct {
     uint16_t inc;                /* auto-increment (reg 15) at the event      */
     uint16_t len;                /* DMA length in words                       */
     uint32_t src;                /* DMA source (68K byte address)             */
+    /* The three most recently ENTERED recompiled functions at the event
+     * (always-on ring in crash_report.c): func[0] is usually the VDP leaf
+     * helper, func[1]/func[2] its callers. Attributes every write to code. */
+    uint32_t func[3];
 } GVdpEvent;
 #define GVDP_EVENT_CAP 16384
 extern GVdpEvent g_gvdp_events[GVDP_EVENT_CAP];

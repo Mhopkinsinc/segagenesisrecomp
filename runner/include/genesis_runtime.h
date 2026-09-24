@@ -85,6 +85,9 @@ typedef void (*RecompFuncPtr)(void);
 void recomp_tail_call(uint32_t addr);
 void recomp_call_addr(uint32_t addr);
 void recomp_call_func(RecompFuncPtr fn);
+/* Always-on recent-function ring (crash_report.c); generated function
+ * prologues record their entry address here. */
+void crash_report_record_block(uint32_t block_addr);
 void recomp_push_return(uint32_t ret_addr);
 uint32_t recomp_resolve_ram_trampoline(uint32_t addr);
 /* Execute terminal one-instruction RAM stubs whose semantics are represented by

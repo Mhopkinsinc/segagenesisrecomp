@@ -73,6 +73,8 @@ typedef struct GenesisBus {
     uint32_t sram_size;                 /* bytes spanned (0 = none)           */
     uint8_t  sram_present;              /* "RA" header found                  */
     uint8_t  sram_enabled;              /* $A130F1 bit0 overlay state         */
+    uint8_t  sram_always;               /* SRAM lies above the ROM image: no
+                                         * mapper, always visible (NHL 94)   */
 } GenesisBus;
 
 void gbus_init(GenesisBus *b, GVDP *vdp);

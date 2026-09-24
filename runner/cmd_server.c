@@ -226,8 +226,10 @@ static void mem_write_log_callback(uint32_t byte_address, uint8_t value, uint32_
     uint8_t  game_mode      = emu_read8 (g_game_layout.game_mode_addr);
 
     extern uint64_t g_chunk_yield_count;
+    extern uint32_t crash_report_recent_block(unsigned back);
     fprintf(s_mem_write_log_file,
             "%d %u %u 0x%06X 0x%02X 0x%06X 0x%06X 0x%06X 0x%06X 0x%06X %u %llu "
+            "f0=0x%06X f1=0x%06X f2=0x%06X f3=0x%06X "
 #if SONIC_REVERSE_DEBUG
             "0x%06X 0x%06X "
             "D0=0x%08X D1=0x%08X D2=0x%08X D3=0x%08X D4=0x%08X D5=0x%08X D6=0x%08X D7=0x%08X "
@@ -241,7 +243,9 @@ static void mem_write_log_callback(uint32_t byte_address, uint8_t value, uint32_
             a7 & 0xFFFFFFu, r0 & 0xFFFFFFu, r1 & 0xFFFFFFu,
             r2 & 0xFFFFFFu, r3 & 0xFFFFFFu,
             (unsigned)target_cycle,
-            (unsigned long long)g_chunk_yield_count
+            (unsigned long long)g_chunk_yield_count,
+            (unsigned)crash_report_recent_block(0), (unsigned)crash_report_recent_block(1),
+            (unsigned)crash_report_recent_block(2), (unsigned)crash_report_recent_block(3)
 #if SONIC_REVERSE_DEBUG
             , (unsigned)(g_rdb_current_func & 0xFFFFFFu),
             (unsigned)(g_cpu.PC & 0xFFFFFFu),
@@ -279,7 +283,7 @@ int cmd_server_mem_write_log_start_ranges(const uint32_t *lo, const uint32_t *hi
     }
 
     fprintf(s_mem_write_log_file,
-        "# wall_frame internal_frame game_mode address value a7 ret0 ret1 ret2 ret3 target_cycle yield"
+        "# wall_frame internal_frame game_mode address value a7 ret0 ret1 ret2 ret3 target_cycle yield f0..f3=recent_function_entries"
 #if SONIC_REVERSE_DEBUG
         " func pc D0 D1 D2 D3 D4 D5 D6 D7 A0 A1 A2 A3 A4 A5 A6 A7"
 #endif
@@ -825,13 +829,37 @@ static void handle_frame_range(int id, const char *json)
 
 static void handle_vblank_info(int id)
 {
-    char buf[256];
+    extern uint64_t g_dbg_vint_delivered_atomic, g_dbg_vint_delivered_interleaved,
+                    g_dbg_vint_pending_flagged, g_dbg_vint_latched_mask,
+                    g_dbg_vint_latched_busy;
+    extern void glue_vint_debug_snapshot(int *, int *, int *, int *);
+    extern void glue_sched_debug_snapshot(uint32_t *, int32_t *, uint32_t *, uint64_t *, int *, int *);
+    int in_progress = 0, latched = 0, pending = 0, yielded = 0;
+    glue_vint_debug_snapshot(&in_progress, &latched, &pending, &yielded);
+    uint32_t debt = 0, stalls = 0; int32_t budget = 0; uint64_t chunk_yields = 0;
+    int state_parked = 0, game_running = 0;
+    glue_sched_debug_snapshot(&debt, &budget, &stalls, &chunk_yields, &state_parked, &game_running);
+    char buf[768];
     snprintf(buf, sizeof(buf),
         "{\"id\":%d,\"ok\":true,\"cycle_accum\":%u,\"threshold\":%u,"
-        "\"imask\":%d,\"frame_count\":%llu}",
+        "\"imask\":%d,\"frame_count\":%llu,"
+        "\"vint_atomic\":%llu,\"vint_interleaved\":%llu,\"vint_pending_flagged\":%llu,"
+        "\"vint_latched_mask\":%llu,\"vint_latched_busy\":%llu,"
+        "\"irq_in_progress\":%d,\"latched\":%d,\"pending_irq\":%d,\"game_yielded_vblank\":%d,"
+        "\"irq_cycle_debt\":%u,\"cycle_budget\":%d,\"main_cpu_stalls\":%u,\"chunk_yields\":%llu,"
+        "\"state_parked\":%d,\"game_running\":%d,\"native_insns\":%llu,\"audio_cyc\":%u}",
         id, g_cycle_accumulator, g_vblank_threshold,
         (int)((g_cpu.SR >> 8) & 7),
-        (unsigned long long)g_frame_count);
+        (unsigned long long)g_frame_count,
+        (unsigned long long)g_dbg_vint_delivered_atomic,
+        (unsigned long long)g_dbg_vint_delivered_interleaved,
+        (unsigned long long)g_dbg_vint_pending_flagged,
+        (unsigned long long)g_dbg_vint_latched_mask,
+        (unsigned long long)g_dbg_vint_latched_busy,
+        in_progress, latched, pending, yielded,
+        debt, budget, stalls, (unsigned long long)chunk_yields,
+        state_parked, game_running,
+        (unsigned long long)g_native_insn_count, g_audio_cycle_counter);
     send_response(buf);
 }
 
@@ -1442,10 +1470,11 @@ static void handle_vdp_events(int id, const char *json)
         if (skip) { skip--; continue; }
         jb_printf(&j, "%s{\"seq\":%u,\"kind\":%u,\"code\":%u,\"reason\":%u,"
                       "\"vbl\":%u,\"line\":%u,\"addr\":%u,\"value\":%u,"
-                      "\"inc\":%u,\"len\":%u,\"src\":%u}",
+                      "\"inc\":%u,\"len\":%u,\"src\":%u,"
+                      "\"f0\":%u,\"f1\":%u,\"f2\":%u}",
                   emitted ? "," : "", e->seq, e->kind, e->code, e->reason,
                   e->in_vblank, e->scanline, e->addr, e->value, e->inc,
-                  (unsigned)e->len, (unsigned)e->src);
+                  (unsigned)e->len, (unsigned)e->src, e->func[0], e->func[1], e->func[2]);
         emitted++;
     }
     jb_printf(&j, "],\"emitted\":%d}", emitted);

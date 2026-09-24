@@ -123,6 +123,10 @@ static void evt_push(const GVDP *v, uint8_t kind, uint8_t code, uint16_t addr,
     e->value     = value;
     e->inc       = inc;
     e->len       = len;
+    { extern uint32_t crash_report_recent_block(unsigned back);
+      e->func[0] = crash_report_recent_block(0);
+      e->func[1] = crash_report_recent_block(1);
+      e->func[2] = crash_report_recent_block(2); }
     e->src       = src;
 }
 

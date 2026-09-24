@@ -89,6 +89,8 @@ typedef struct {
      * but for the level-6/4 IRQ trampolines that run BEFORE the
      * recompiled handler is dispatched. Usually the same value as
      * vbla_stack. */
+    /* 0 = deliver interrupt handlers on the game's live A7 (hardware
+     * behaviour, no relocation / RAM save-restore). */
     uint32_t intr_stack;
 
     /* Player object slot (byte 0 = object ID, $01 = Sonic in S1/S2).

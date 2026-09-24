@@ -86,6 +86,17 @@ typedef struct GameSpec {
      * coverage and keep it off so a miss stays a loud regression). */
     int         tier3_floor_default;
 
+    /* Run V-int/H-int handlers INTERLEAVED on the game fiber even when the
+     * game is not parked at a recognized WaitForVBlank yield (0 = only when
+     * parked; mid-run interrupts stay atomic). Required by games whose
+     * interrupt handler busy-waits on the Z80 (NHL 94's sound-driver
+     * handshake inside its V-blank routine): an atomic handler freezes the
+     * scheduler, so the Z80 never answers and the handler spins forever.
+     * Interleaved delivery lets the handler's bus accesses drain the cycle
+     * budget and step the Z80, as hardware does. GENESIS_INTERLEAVE_IRQ
+     * still overrides in either direction. */
+    int         vint_interleave_default;
+
     /* Optional statically-recompiled Z80 coprocessor backend. The generated
      * function executes exactly one instruction from the explicit Z80 PC and
      * returns; the shared Genesis scheduler remains responsible for cycle

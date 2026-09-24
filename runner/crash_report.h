@@ -40,6 +40,9 @@
  */
 void crash_report_record_block(uint32_t block_addr);
 
+/* Entry `back` steps into the past (0 = most recent). 0 when unavailable. */
+uint32_t crash_report_recent_block(unsigned back);
+
 /*
  * Load addr→name mappings from a CSV with `addr,name` rows (the
  * gen_annotations_csv.py output). Returns the number of symbols

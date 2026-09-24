@@ -38,6 +38,15 @@ typedef struct {
 
 typedef struct { uint32_t lo; uint32_t hi; } ProtectedRange;
 
+/* [[inline_args]] — a callee whose call sites are followed by inline data it
+ * skips before returning (EA text printer: `jsr Print ; dc.w len ; dc.b ...`).
+ * `length = "word"`: the first word after the call is the block's total byte
+ * length (including itself), so the caller resumes at ret + word. Declared
+ * here because a listing can mis-decode the inline bytes; the runtime-checked
+ * return slot still governs execution, this only makes the continuation
+ * static. */
+typedef struct { uint32_t callee; int length_word; } InlineArgCallee;
+
 /*
  * Widescreen (16:9) injection site — a single instruction in the ORIGINAL
  * (unmodified) ROM whose generated C the recompiler widens by a runtime margin
@@ -190,6 +199,9 @@ typedef struct {
     JumpTableEntry *jump_tables;
     int            jump_table_count;
     int            jump_table_cap;
+    InlineArgCallee *inline_args;
+    int             inline_arg_count;
+    int             inline_arg_cap;
     uint32_t       *extra_funcs;
     int            extra_func_count;
     int            extra_func_cap;
@@ -290,6 +302,18 @@ bool game_config_is_blacklisted(const GameConfig *cfg, uint32_t addr);
  * oracle. If no code_addrs_file was loaded (code_addr_count == 0) this returns
  * true for every address (gating disabled — prior behavior). */
 bool game_config_is_known_code(const GameConfig *cfg, uint32_t addr);
+
+/* True if a disasm code-address oracle (code_addrs_file) is loaded. */
+bool game_config_has_code_oracle(const GameConfig *cfg);
+
+/* Non-zero if `callee` is a declared [[inline_args]] routine whose inline
+ * block starts with its own byte length (1). 0 when not declared. */
+int game_config_inline_arg_kind(const GameConfig *cfg, uint32_t callee);
+
+/* Smallest known instruction-start address >= addr, or 0 when there is none
+ * (or no oracle is loaded). Used to resume a caller's scan past inline
+ * arguments that follow a `jsr` to a return-slot-rewriting callee. */
+uint32_t game_config_next_known_code(const GameConfig *cfg, uint32_t addr);
 
 /* True if a runtime executed-PC oracle is loaded for this game. */
 bool game_config_has_runtime_oracle(const GameConfig *cfg);

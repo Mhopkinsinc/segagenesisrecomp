@@ -311,6 +311,28 @@ static bool merge_toml(GameConfig *cfg, toml_table_t *root, const char *src_path
         }
     }
 
+    /* [[inline_args]] */
+    toml_array_t *ias = toml_array_in(root, "inline_args");
+    if (ias) {
+        int n = toml_array_nelem(ias);
+        for (int i = 0; i < n; i++) {
+            toml_table_t *t = toml_table_at(ias, i);
+            if (!t) continue;
+            uint32_t callee = toml_u32_or(t, "callee", 0);
+            char len[32] = {0};
+            toml_string_into(t, "length", len, sizeof(len));
+            if (!callee || strcmp(len, "word") != 0) {
+                fprintf(stderr, "[GameConfig] [[inline_args]] entry %d: need callee and length = \"word\"\n", i);
+                continue;
+            }
+            cfg->inline_args = grow_to_fit(cfg->inline_args, &cfg->inline_arg_cap,
+                                           cfg->inline_arg_count, sizeof(InlineArgCallee));
+            cfg->inline_args[cfg->inline_arg_count].callee = callee;
+            cfg->inline_args[cfg->inline_arg_count].length_word = 1;
+            cfg->inline_arg_count++;
+        }
+    }
+
     /* [[protected_range]] */
     toml_array_t *pr = toml_array_in(root, "protected_range");
     if (pr) {
@@ -337,6 +359,7 @@ void game_config_init_empty(GameConfig *cfg) {
 
 void game_config_free(GameConfig *cfg) {
     free(cfg->jump_tables);
+    free(cfg->inline_args);
     free(cfg->extra_funcs);
     free(cfg->late_extra_funcs);
     free(cfg->function_pointer_helpers);
@@ -582,6 +605,28 @@ bool game_config_is_known_code(const GameConfig *cfg, uint32_t addr) {
     if (!cfg || cfg->code_addr_count == 0) return true;
     return bsearch(&addr, cfg->code_addrs, (size_t)cfg->code_addr_count,
                    sizeof(uint32_t), cmp_u32) != NULL;
+}
+
+int game_config_inline_arg_kind(const GameConfig *cfg, uint32_t callee) {
+    if (!cfg) return 0;
+    for (int i = 0; i < cfg->inline_arg_count; i++)
+        if (cfg->inline_args[i].callee == callee) return cfg->inline_args[i].length_word ? 1 : 0;
+    return 0;
+}
+
+bool game_config_has_code_oracle(const GameConfig *cfg) {
+    return cfg && cfg->code_addr_count > 0;
+}
+
+uint32_t game_config_next_known_code(const GameConfig *cfg, uint32_t addr) {
+    if (!game_config_has_code_oracle(cfg)) return 0;
+    int lo = 0, hi = cfg->code_addr_count;
+    while (lo < hi) {
+        int mid = lo + (hi - lo) / 2;
+        if (cfg->code_addrs[mid] < addr) lo = mid + 1;
+        else                             hi = mid;
+    }
+    return lo < cfg->code_addr_count ? cfg->code_addrs[lo] : 0;
 }
 
 bool game_config_has_runtime_oracle(const GameConfig *cfg) {

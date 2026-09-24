@@ -153,6 +153,16 @@ void gbus_sram_setup(GenesisBus *b)
             b->sram_base    = base;
             b->sram_end     = end;
             b->sram_size    = end - base + 1u;
+            /* Carts whose SRAM sits ABOVE the ROM image (header ROM end at
+             * $1A4) have no bank-switching mapper: the SRAM is decoded on the
+             * bus unconditionally and the game never writes $A130F1 (NHL 94:
+             * 1 MB ROM, SRAM $200001-$203FFF, zero references to $A130F1).
+             * Gating those on the enable bit made every save read open bus,
+             * so the game's checksum failed and it hid its save-backed
+             * features. Only SRAM that shadows ROM needs the mapper bit. */
+            uint32_t rom_end = ((uint32_t)g_rom[0x1A4] << 24) | ((uint32_t)g_rom[0x1A5] << 16)
+                             | ((uint32_t)g_rom[0x1A6] << 8)  |  (uint32_t)g_rom[0x1A7];
+            b->sram_always  = (base > rom_end) ? 1 : 0;
         }
     }
 }
@@ -183,7 +193,7 @@ void gbus_sram_set_geometry(GenesisBus *b, uint32_t start, uint32_t end)
  * always-mapped SRAM can be handled when one shows up). */
 static int sram_hit(const GenesisBus *b, uint32_t a)
 {
-    return b->sram_present && b->sram_enabled
+    return b->sram_present && (b->sram_enabled || b->sram_always)
         && a >= b->sram_base && a <= b->sram_end;
 }
 
