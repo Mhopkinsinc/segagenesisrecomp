@@ -383,6 +383,19 @@ static void step_z80(GenesisMachine *m, uint32_t target)
 #endif
 }
 
+/* Run the Z80 for `z80_cycles` T-states outside the per-scanline schedule.
+ * Used by the glue when the 68K releases the Z80 bus while the scheduler
+ * cannot run (inside a V-int handler): a driver handshake spin such as
+ * NHL 94's Z80_WriteVolume releases the bus, delays, re-requests it and
+ * re-reads the driver's ready byte, expecting the Z80 to have advanced in
+ * between as it does on hardware. Bounded by the caller's own loop; any
+ * overshoot is carried in z80_cycle_debt like a normal slice. */
+void machine_z80_run_extra(uint32_t z80_cycles)
+{
+    GenesisMachine *m = &g_machine;
+    step_z80(m, m->z80_cycle_debt + z80_cycles);
+}
+
 void machine_run_frame(GenesisScanlineSink sink, void *user)
 {
     GenesisMachine *m = &g_machine;

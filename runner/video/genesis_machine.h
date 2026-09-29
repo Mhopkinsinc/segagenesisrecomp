@@ -46,5 +46,6 @@ int machine_load_state(FILE *f);
 /* Run one full frame: per scanline, advance the 68K (fiber), step the Z80, tick
  * the VDP, deliver interrupts, and emit active scanlines via `sink`. */
 void machine_run_frame(GenesisScanlineSink sink, void *user);
+void machine_z80_run_extra(uint32_t z80_cycles);   /* step the Z80 outside the scanline loop */
 
 #endif /* GENESIS_MACHINE_H */

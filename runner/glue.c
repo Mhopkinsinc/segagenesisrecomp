@@ -1782,6 +1782,25 @@ uint32_t m68k_read32(uint32_t byte_addr)
     return ((uint32_t)hi << 16) | (uint32_t)lo;
 }
 
+/* Z80 bus release inside a V-int handler. The scanline scheduler only runs
+ * when the game fiber yields, and yields are gated while a V-int handler
+ * executes (s_in_vblank_service), so the Z80 never advances there. A
+ * handler that hands the Z80 a command and then spins on the driver's
+ * ready byte (NHL 94 MusicVB -> Z80_WriteVolume: release bus, delay,
+ * re-request, re-read $A00096/$A00097) therefore deadlocks whenever the
+ * driver was mid-command at delivery -- on hardware the Z80 simply keeps
+ * running while the 68K spins. Give the Z80 one scanline's worth of
+ * T-states per release so the spin self-paces exactly as it does on the
+ * main loop through the z80-poll yield. */
+#define Z80_RELEASE_CATCHUP_TSTATES 228u
+static inline void z80_release_catchup(uint32_t byte_addr, uint16_t busreq_bits)
+{
+    if (byte_addr == 0xA11100u && !(busreq_bits & 0x0100u) && s_in_vblank_service) {
+        extern void machine_z80_run_extra(uint32_t z80_cycles);
+        machine_z80_run_extra(Z80_RELEASE_CATCHUP_TSTATES);
+    }
+}
+
 void m68k_write16(uint32_t byte_addr, uint16_t val)
 {
     byte_addr &= 0xFFFFFFu;
@@ -1798,6 +1817,7 @@ void m68k_write16(uint32_t byte_addr, uint16_t val)
         g_mem_write_trace_fn(byte_addr + 1u, (uint8_t)val,        g_audio_cycle_counter);
     }
     gbus_write16(&g_machine.bus, byte_addr, val);
+    z80_release_catchup(byte_addr, val);
 }
 
 void m68k_write8(uint32_t byte_addr, uint8_t val)
@@ -1817,6 +1837,7 @@ void m68k_write8(uint32_t byte_addr, uint8_t val)
     if (g_mem_write_trace_fn)
         g_mem_write_trace_fn(byte_addr, val, g_audio_cycle_counter);
     gbus_write8(&g_machine.bus, byte_addr, val);
+    z80_release_catchup(byte_addr, (uint16_t)val << 8);   /* byte write hits the high (bit-8) half */
 }
 
 void m68k_write32(uint32_t byte_addr, uint32_t val)
